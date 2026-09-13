@@ -1,0 +1,10 @@
+# Custom ByteTrack config cho bai toan dung do xe
+# Tang track_buffer de giu ID khi bi che khuat lau hon
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 150          # 150 frames = ~6 giay o 25fps (mac dinh la 30). Giu ID song lau hon khi bi che khuat.
+match_thresh: 0.8
+fuse_score: True

@@ -1,0 +1,11 @@
+# YOLO Training Config for UA-DETRAC (Vehicle Detection)
+# Tất cả vehicle types (car, bus, van, others) → class 0: vehicle
+
+path: c:/Users/ADMIN/Module dừng đỗ xe/data
+train: train/images
+val: val/images
+test: test/images
+
+nc: 1
+names:
+  0: vehicle

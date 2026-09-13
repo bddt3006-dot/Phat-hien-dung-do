@@ -1,0 +1,27 @@
+model:
+  classes:
+  - 2
+  - 3
+  - 5
+  - 7
+  conf_threshold: 0.3
+  device: cuda:0
+  imgsz: 960
+  weights: yolo11m.pt
+rules:
+  movement_tolerance: 25.0
+  roi:
+  - - 272
+    - 91
+  - - 408
+    - 118
+  - - 229
+    - 352
+  - - 2
+    - 321
+  time_threshold: 5.0
+tracking:
+  tracker: config/bytetrack_custom.yaml
+video:
+  output_dir: output
+  source: data/sample.mp4
