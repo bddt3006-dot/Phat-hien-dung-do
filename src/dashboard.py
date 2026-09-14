@@ -24,6 +24,7 @@ except ImportError:
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from ultralytics import YOLO
 from rule_engine import ParkingRuleEngine
+from model_utils import load_yolo_model, get_target_classes, get_model_info, discover_available_weights, DEFAULT_BASELINE_WEIGHTS
 
 # ---- Cấu hình Trang Streamlit ----
 st.set_page_config(
@@ -139,11 +140,14 @@ config = load_config()
 
 # ---- Tải Model (Cache) ----
 @st.cache_resource
-def get_model(weights_path, device):
-    full_path = os.path.join(ROOT_DIR, weights_path)
-    if not os.path.exists(full_path):
-        full_path = weights_path
-    return YOLO(full_path)
+def get_cached_model(weights_path, device):
+    m, loaded_p, is_fb = load_yolo_model(
+        weights_path=weights_path,
+        device=device,
+        fallback_path=config['model'].get('baseline_weights', DEFAULT_BASELINE_WEIGHTS),
+        root_dir=ROOT_DIR
+    )
+    return m, loaded_p, is_fb
 
 # ---- Khởi Tạo Session State ----
 if 'is_playing' not in st.session_state:
@@ -162,6 +166,8 @@ if 'last_click_key' not in st.session_state:
     st.session_state.last_click_key = None
 if 'roi_selected_frame_idx' not in st.session_state:
     st.session_state.roi_selected_frame_idx = 0
+if 'selected_weights' not in st.session_state:
+    st.session_state.selected_weights = config['model'].get('weights', 'output_runs/best.pt')
 
 # Quét tất cả video có sẵn trong thư mục data/
 available_videos = []
@@ -193,6 +199,64 @@ with st.sidebar:
             f.write(uploaded_file.getbuffer())
         st.success(f"Đã lưu: {uploaded_file.name}")
         if save_uploaded_path.replace('\\', '/') not in available_videos:
+            st.rerun()
+
+    st.markdown("---")
+    # 2. Lựa Chọn & Quản Lý Mô Hình Nhận Diện (Weights)
+    st.markdown("### 🤖 Mô Hình Nhận Diện (Weights)")
+    
+    available_models = discover_available_weights(ROOT_DIR)
+    model_paths = [m[1] for m in available_models]
+    model_labels = {m[1]: m[0] for m in available_models}
+    
+    curr_w = st.session_state.selected_weights
+    if curr_w not in model_paths and model_paths:
+        model_paths.insert(0, curr_w)
+        model_labels[curr_w] = f"⚙️ Mô hình tùy chọn ({os.path.basename(curr_w)})"
+        
+    def_idx = model_paths.index(curr_w) if curr_w in model_paths else 0
+    
+    chosen_w = st.selectbox(
+        "Trọng số YOLO đang chạy:",
+        options=model_paths,
+        format_func=lambda x: model_labels.get(x, x),
+        index=def_idx,
+        help="Chuyển đổi ngay giữa mô hình custom vừa huấn luyện và mô hình gốc baseline"
+    )
+    
+    if chosen_w != st.session_state.selected_weights:
+        st.session_state.selected_weights = chosen_w
+        st.rerun()
+
+    # Nạp thông tin mô hình để xem trước thông số
+    preview_model, preview_path, is_fb = get_cached_model(chosen_w, config['model'].get('device', 'cuda:0'))
+    m_info = get_model_info(preview_model, preview_path)
+    preview_cls = get_target_classes(preview_model, config['model'].get('classes', None))
+    
+    st.markdown(f"""
+    <div style="background-color: #212121; padding: 10px; border-radius: 6px; border-left: 3px solid #00E676; margin-bottom: 10px; font-size: 0.85rem;">
+        <b>Tên file:</b> <code>{m_info['filename']}</code> ({m_info['size_mb']} MB)<br>
+        <b>Lớp nhận diện:</b> <code>{preview_cls}</code> ({m_info['num_classes']} classes)<br>
+        <span style="color: #9E9E9E;">{m_info['description']}</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_save_w, col_rollback_w = st.columns([1.2, 1.2])
+    with col_save_w:
+        if st.button("💾 Đặt Mặc Định", use_container_width=True, help="Lưu mô hình này vào file settings.yaml"):
+            config['model']['weights'] = chosen_w
+            config['model']['classes'] = preview_cls
+            save_config(config)
+            st.toast("✅ Đã lưu mô hình làm mặc định!", icon="💾")
+            
+    with col_rollback_w:
+        baseline_w = config['model'].get('baseline_weights', DEFAULT_BASELINE_WEIGHTS)
+        if st.button("↩️ Khôi Phục Gốc", use_container_width=True, help=f"ĐƯỜNG LUI: Lập tức quay về mô hình gốc {baseline_w}"):
+            config['model']['weights'] = baseline_w
+            config['model']['classes'] = [2, 3, 5, 7]
+            save_config(config)
+            st.session_state.selected_weights = baseline_w
+            st.toast("🛡️ Đã khôi phục mô hình gốc Baseline!", icon="↩️")
             st.rerun()
 
     st.markdown("---")
@@ -280,6 +344,22 @@ with tab_live:
         else:
             st.markdown('<span class="status-badge-stopped">■ ĐÃ DỪNG</span>', unsafe_allow_html=True)
 
+    # Khởi tạo mô hình (Hỗ trợ chuyển đổi nhanh và đường lui)
+    active_weights = st.session_state.get('selected_weights', config['model'].get('weights', 'output_runs/best.pt'))
+    model, loaded_path, is_fallback = get_cached_model(active_weights, config['model'].get('device', 'cuda:0'))
+    target_classes = get_target_classes(model, config['model'].get('classes', None))
+    model_info = get_model_info(model, loaded_path)
+
+    # Hiển thị Banner trạng thái mô hình
+    fallback_badge = " <span style='color: #FFC107; font-weight: bold;'>[FALLBACK ACTIVE]</span>" if is_fallback else ""
+    st.markdown(f"""
+    <div style="background: linear-gradient(90deg, #1E1E1E, #263238); border-left: 4px solid #00E676; padding: 6px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 0.88rem;">
+        🤖 <b>Mô hình AI:</b> <code style="color: #00E676;">{model_info['filename']}</code> ({model_info['type']}) | 
+        <b>Lớp nhận diện:</b> <code>{target_classes}</code> | 
+        <b>Dung lượng:</b> <code>{model_info['size_mb']} MB</code>{fallback_badge}
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("---")
 
     # Bố cục màn hình: Video bên trái (75%), Thông số thời gian thực bên phải (25%)
@@ -299,9 +379,6 @@ with tab_live:
         st.markdown("#### 🚨 Cảnh Báo Mới")
         alert_placeholder = st.empty()
 
-    # Khởi tạo mô hình
-    model = get_model(config['model']['weights'], config['model'].get('device', 'cuda:0'))
-
     # Logic xử lý phát video hoặc nhảy 1 frame
     if os.path.exists(full_video_path):
         cap = cv2.VideoCapture(full_video_path)
@@ -318,13 +395,13 @@ with tab_live:
                 st.session_state.current_frame += 1
                 cur_t = st.session_state.current_frame / fps
                 
-                # Tracking
+                # Tracking với target_classes tự động phân giải
                 results = model.track(
                     frame,
                     tracker=config['tracking']['tracker'],
                     conf=config['model']['conf_threshold'],
                     imgsz=config['model']['imgsz'],
-                    classes=config['model'].get('classes', None),
+                    classes=target_classes,
                     device=config['model'].get('device', 'cuda:0'),
                     persist=True,
                     verbose=False
@@ -400,13 +477,13 @@ with tab_live:
                 st.session_state.current_frame += 1
                 cur_time = st.session_state.current_frame / fps
 
-                # Inference YOLO Tracking
+                # Inference YOLO Tracking với target_classes tự động phân giải
                 results = model.track(
                     frame,
                     tracker=config['tracking']['tracker'],
                     conf=config['model']['conf_threshold'],
                     imgsz=config['model']['imgsz'],
-                    classes=config['model'].get('classes', None),
+                    classes=target_classes,
                     device=config['model'].get('device', 'cuda:0'),
                     persist=True,
                     verbose=False
@@ -969,4 +1046,11 @@ with tab_help:
 
     3. **Xuất Báo Cáo & Xem Ảnh Bằng Chứng**:
        - Chuyển sang Tab **`📸 Bằng Chứng Vi Phạm`** để xem bảng log, xem ảnh bằng chứng chụp tự động khi xe vượt ngưỡng thời gian và tải file CSV về máy.
+
+    4. **Đổi Mô Hình & Đường Lui (Rollback)**:
+       - Tại Sidebar bên trái, mục **`🤖 Mô Hình Nhận Diện (Weights)`** cho phép bạn tự do chọn giữa:
+         + `🎯 Custom Model: output_runs/best.pt`: Mô hình chuyên biệt đã train trên UA-DETRAC, siêu nhẹ (18.3 MB), FPS cao, độ tin cậy phát hiện xe cao (0.80).
+         + `🛡️ Baseline Model: yolo11m.pt`: Mô hình gốc ban đầu (COCO), bao quát nhiều phương tiện ở xa.
+       - **Đường lui an toàn**: Bất cứ lúc nào cảm thấy mô hình custom nhận diện kém hơn, bạn chỉ cần bấm **`↩️ Khôi Phục Gốc`** ở Sidebar, hệ thống sẽ lập tức quay về `yolo11m.pt` với 1 cú click!
+       - Bấm **`💾 Đặt Mặc Định`** để ghi nhớ mô hình ưa thích của bạn vào file cấu hình.
     """)

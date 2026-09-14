@@ -1,13 +1,22 @@
+# Cấu hình hệ thống giám sát dừng đỗ xe thông minh
 model:
+  # Trọng số đang kích hoạt (Mặc định dùng mô hình đã huấn luyện từ output_runs):
+  weights: output_runs/best.pt
+  
+  # Đường lui: Trọng số gốc ban đầu (COCO baseline) dùng khi cần quay lại:
+  baseline_weights: yolo11m.pt
+  
+  # Danh sách lớp mục tiêu cần phát hiện:
+  # - Mô hình custom (output_runs/best.pt): lớp 0 (vehicle)
+  # - Mô hình gốc (yolo11m.pt): lớp [2, 3, 5, 7] (car, motorcycle, bus, truck)
+  # (Hệ thống có bộ Smart Class Resolver tự động chọn đúng lớp nếu bạn đổi mô hình)
   classes:
-  - 2
-  - 3
-  - 5
-  - 7
+  - 0
+  
   conf_threshold: 0.3
   device: cuda:0
   imgsz: 960
-  weights: yolo11m.pt
+
 rules:
   movement_tolerance: 25.0
   roi:
@@ -20,8 +29,10 @@ rules:
   - - 2
     - 321
   time_threshold: 5.0
+
 tracking:
   tracker: config/bytetrack_custom.yaml
+
 video:
   output_dir: output
   source: data/sample.mp4

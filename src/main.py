@@ -3,26 +3,70 @@ import yaml
 import numpy as np
 import os
 import csv
+import sys
+import argparse
 from datetime import datetime
+
+# Thêm src vào sys.path
+sys.path.insert(0, os.path.dirname(__file__))
 from ultralytics import YOLO
 from rule_engine import ParkingRuleEngine
+from model_utils import load_yolo_model, get_target_classes, get_model_info, DEFAULT_BASELINE_WEIGHTS
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Chương trình Giám Sát Dừng Đỗ Xe Thông Minh")
+    parser.add_argument('--weights', type=str, default=None,
+                        help="Đường dẫn tới file trọng số model (VD: output_runs/best.pt hoặc yolo11m.pt)")
+    parser.add_argument('--baseline', action='store_true',
+                        help="Bật ngay mô hình gốc (yolo11m.pt) để làm đường lui so sánh mà không cần sửa cấu hình")
+    parser.add_argument('--video', type=str, default=None,
+                        help="Đường dẫn file video đầu vào (ghi đè cấu hình trong settings.yaml)")
+    parser.add_argument('--device', type=str, default=None,
+                        help="Thiết bị chạy (VD: cuda:0 hoặc cpu)")
+    return parser.parse_args()
 
 def main():
+    args = parse_args()
+
     # 1. Tải cấu hình
-    config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'settings.yaml')
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    config_path = os.path.join(root_dir, 'config', 'settings.yaml')
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    # 2. Khởi tạo Model
-    model_path = os.path.join(os.path.dirname(__file__), '..', config['model']['weights'])
-    if not os.path.exists(model_path):
-        print(f"[CẢNH BÁO] File model '{model_path}' chưa tồn tại, dùng yolo11m.pt gốc...")
-        model = YOLO('yolo11m.pt') 
+    # 2. Khởi tạo Model (Hỗ trợ đường lui Baseline)
+    baseline_w = config['model'].get('baseline_weights', DEFAULT_BASELINE_WEIGHTS)
+    if args.baseline:
+        selected_weights = baseline_w
+        print(f"[ĐƯỜNG LUI] Kích hoạt mô hình gốc Baseline: {selected_weights}")
+    elif args.weights:
+        selected_weights = args.weights
+        print(f"[THAM SỐ] Chỉ định mô hình qua dòng lệnh: {selected_weights}")
     else:
-        model = YOLO(model_path)
-        
+        selected_weights = config['model'].get('weights', 'output_runs/best.pt')
+
+    device = args.device or config['model'].get('device', 'cuda:0')
+    model, loaded_path, is_fallback = load_yolo_model(
+        weights_path=selected_weights,
+        device=device,
+        fallback_path=baseline_w,
+        root_dir=root_dir
+    )
+
+    # Tự động phân giải các lớp cần phát hiện (Smart Class Resolver)
+    target_classes = get_target_classes(model, config['model'].get('classes', None))
+    model_info = get_model_info(model, loaded_path)
+
+    print("=" * 60)
+    print(f"  MÔ HÌNH NHẬN DIỆN: {model_info['filename']}")
+    print(f"  LOẠI MÔ HÌNH:      {model_info['type']}")
+    print(f"  LỚP PHÁT HIỆN:     {target_classes} (Tổng {model_info['num_classes']} lớp)")
+    if is_fallback:
+        print("  [LƯU Ý] Đang chạy ở chế độ FALLBACK (mô hình gốc)")
+    print("=" * 60)
+
     # Thư mục lưu bằng chứng
-    evidence_dir = os.path.join(os.path.dirname(__file__), '..', 'evidence')
+    evidence_dir = os.path.join(root_dir, 'evidence')
     os.makedirs(evidence_dir, exist_ok=True)
     evidence_csv = os.path.join(evidence_dir, 'violation_log.csv')
     if not os.path.exists(evidence_csv):
@@ -33,7 +77,8 @@ def main():
     rule_engine = ParkingRuleEngine(config)
     
     # 4. Mở Video
-    video_source = os.path.join(os.path.dirname(__file__), '..', config['video']['source'])
+    raw_video = args.video or config['video']['source']
+    video_source = os.path.join(root_dir, raw_video) if not os.path.isabs(raw_video) else raw_video
     cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
         print(f"[LỖI] Không thể mở video: {video_source}")
@@ -45,7 +90,7 @@ def main():
         
     frame_count = 0
     
-    print("Bắt đầu xử lý video... Bấm 'q' để thoát.")
+    print(f"Bắt đầu xử lý video '{os.path.basename(video_source)}'... Bấm 'q' để thoát.")
     
     while True:
         ret, frame = cap.read()
@@ -57,14 +102,14 @@ def main():
         frame_count += 1
         
         # Inference bằng YOLO kèm Tracking
-        # Sử dụng bytetrack.yaml cấu hình mặc định của ultralytics
+        # Sử dụng target_classes đã được tự động chuẩn hóa
         results = model.track(
             frame,
             tracker=config['tracking']['tracker'],
             conf=config['model']['conf_threshold'],
             imgsz=config['model']['imgsz'],
-            classes=config['model'].get('classes', None),
-            device=config['model'].get('device', 'cuda:0'),
+            classes=target_classes,
+            device=device,
             persist=True,
             verbose=False
         )
@@ -140,9 +185,9 @@ def main():
             cv2.rectangle(frame, (x1, y1 - 25), (x1 + w, y1), color, -1)
             cv2.putText(frame, status_txt, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0) if color == (0, 215, 255) else (255, 255, 255), 2)
 
-        # Hiển thị thông số tổng quát
-        cv2.putText(frame, f"Time: {current_time:.1f}s | Violations: {len(violations)}", (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 3)
+        # Hiển thị thông số tổng quát kèm tên model đang chạy
+        cv2.putText(frame, f"Model: {model_info['filename']} | Time: {current_time:.1f}s | Violations: {len(violations)}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 165, 255), 2)
 
         # Hiển thị kết quả (scale nhỏ lại cho vừa màn hình nếu ảnh to)
         display_frame = cv2.resize(frame, (1280, 720))

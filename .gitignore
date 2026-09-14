@@ -19,6 +19,9 @@ data/split_info/
 *.onnx
 *.engine
 runs/
+output_runs/
+*.zip
+*.backup*
 
 # ============================================================
 # 3. Output Logs & Evidence

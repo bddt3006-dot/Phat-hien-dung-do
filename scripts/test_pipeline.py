@@ -6,23 +6,32 @@ import csv
 from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 from ultralytics import YOLO
 from src.rule_engine import ParkingRuleEngine
+from src.model_utils import load_yolo_model, get_target_classes, get_model_info
 
 def run_test():
-    with open('config/settings.yaml', 'r', encoding='utf-8') as f:
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    with open(os.path.join(root_dir, 'config', 'settings.yaml'), 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    model = YOLO('yolo11m.pt')
+    weights_to_test = config['model'].get('weights', 'output_runs/best.pt')
+    model, loaded_path, is_fallback = load_yolo_model(weights_to_test, root_dir=root_dir)
+    target_classes = get_target_classes(model, config['model'].get('classes', None))
+    m_info = get_model_info(model, loaded_path)
+
     engine = ParkingRuleEngine(config)
-    cap = cv2.VideoCapture('data/sample.mp4')
+    video_p = os.path.join(root_dir, config['video']['source'])
+    cap = cv2.VideoCapture(video_p)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
-    evidence_dir = 'evidence'
+    evidence_dir = os.path.join(root_dir, 'evidence')
     os.makedirs(evidence_dir, exist_ok=True)
     evidence_csv = os.path.join(evidence_dir, 'violation_log.csv')
 
-    print("Running pipeline test on sample.mp4 with un-finetuned YOLO11m...")
+    print(f"Running pipeline test with model: {m_info['filename']} ({m_info['type']})")
+    print(f"Target classes: {target_classes} | Image size: {config['model']['imgsz']}")
     frame_count = 0
     total_violations_found = 0
 
@@ -39,7 +48,7 @@ def run_test():
             tracker=config['tracking']['tracker'],
             conf=config['model']['conf_threshold'],
             imgsz=config['model']['imgsz'],
-            classes=config['model'].get('classes', None),
+            classes=target_classes,
             device=config['model'].get('device', 'cuda:0'),
             persist=True,
             verbose=False
