@@ -4,11 +4,13 @@ from collections import deque
 
 class ParkingRuleEngine:
     """
-    Engine phân tích hành vi dừng đỗ phương tiện thông minh:
+    Engine phân tích hành vi dừng đỗ phương tiện thông minh & chống báo sai xe đang chạy:
     - Tách biệt hoàn toàn trạng thái ĐANG CHẠY (Moving) và ĐANG DỪNG ĐỖ (Stopped/Stationary).
-    - CHỈ KHI xe thực sự dừng hẳn trong vùng ROI (vận tốc ~ 0 px/s) thì hệ thống mới bắt đầu đếm giây đỗ.
-    - Xe đang chạy qua ROI sẽ KHÔNG bị tính thời gian dừng đỗ.
-    - Khi xe đang đỗ mà lăn bánh di chuyển rời đi, timer đỗ sẽ tự động kết thúc.
+    - CƠ CHẾ XÁC NHẬN DỪNG LIÊN TỤC (Debounce 1.2s): Xe bắt buộc phải đứng yên liên tục trong ít nhất 
+      1.2 giây mới bắt đầu kích hoạt trạng thái dừng đỗ. Xe đang chạy qua dù có bị chậm lại hoặc 
+      detector rung 1-2 frames cũng TUYỆT ĐỐI KHÔNG bị gắn nhãn dừng đỗ hay đếm giây!
+    - KHÓA ĐIỂM NEO VỊ TRÍ (Anchor Locking): Điểm neo đỗ được cố định tại vị trí dừng thực tế, không bị trôi 
+      theo xe, giúp nhận diện chính xác khoảnh khắc xe lăn bánh rời đi để lập tức hủy timer.
     """
     def __init__(self, config):
         self.time_threshold = float(config['rules'].get('time_threshold', 5.0))
@@ -16,21 +18,23 @@ class ParkingRuleEngine:
         self.roi_polygon = np.array(config['rules'].get('roi', []), np.int32)
         
         # Ngưỡng vận tốc xác định xe đứng yên (pixel/giây)
-        # Bbox của xe đứng yên thường dao động nhẹ 1-3 px do detector jitter (~5-8 px/s ở 25 FPS)
-        # Xe lưu thông bình thường luôn có vận tốc > 15-20 px/s
-        self.stop_speed_threshold = 12.0
+        # Xe đứng yên dao động nhẹ 1-3 px do detector jitter (~3-6 px/s ở 25-30 FPS)
+        self.stop_speed_threshold = 10.0
         
         # Ngưỡng dịch chuyển tịnh tiến tối đa trong cửa sổ quan sát (pixel)
-        self.stop_dist_threshold = 15.0
+        self.stop_dist_threshold = 12.0
+        
+        # THỜI GIAN XÁC NHẬN DỪNG LIÊN TỤC (giây): Xe phải đứng yên liên tục đủ 1.2s mới tính là đỗ
+        self.min_stationary_seconds = 1.2
         
         # Cửa sổ thời gian tính vận tốc tức thời (giây)
         self.speed_window_seconds = 0.8
         
         # Thời gian ân hạn khi xe bị khuất (mất track do xe khác đi ngang qua)
-        self.max_missing_seconds = 6.0
+        self.max_missing_seconds = 5.0
         
         # Thời gian ân hạn khi xe tạm thời ra ngoài ROI
-        self.roi_grace_seconds = 2.5
+        self.roi_grace_seconds = 2.0
         
         # Lưu trữ trạng thái xe: {track_id: dict}
         self.history = {}
@@ -56,7 +60,6 @@ class ParkingRuleEngine:
         if len(self.roi_polygon) < 3:
             return True
         
-        # 1. Kiểm tra 9 điểm đặc trưng của bbox
         check_points = [
             (x1, y1), (x2, y1), (x1, y2), (x2, y2),
             ((x1+x2)/2, y1), ((x1+x2)/2, y2),
@@ -67,7 +70,6 @@ class ParkingRuleEngine:
             if cv2.pointPolygonTest(self.roi_polygon, (float(pt[0]), float(pt[1])), False) >= 0:
                 return True
         
-        # 2. Kiểm tra đỉnh ROI có lọt vào bbox không
         for pt in self.roi_polygon:
             px, py = float(pt[0]), float(pt[1])
             if x1 <= px <= x2 and y1 <= py <= y2:
@@ -85,7 +87,7 @@ class ParkingRuleEngine:
         # Tâm xe
         if cv2.pointPolygonTest(self.roi_polygon, (float(cx), float(cy)), False) >= 0:
             return True
-        # Phần lớn diện tích bbox
+        # Phần diện tích bbox tiếp xúc ROI
         return self.bbox_touches_roi(x1, y1, x2, y2)
 
     def update(self, tracks, current_time):
@@ -115,7 +117,7 @@ class ParkingRuleEngine:
 
             # Trường hợp track_id chưa có trong history
             if track_id not in self.history:
-                # Kiểm tra Spatial Re-ID: kế thừa xe cũ đỗ tại vị trí này vừa bị mất dấu tạm thời
+                # Kiểm tra Spatial Re-ID: chỉ kế thừa xe đỗ cũ nếu xe đỗ cũ thực sự đứng yên tại vị trí đó
                 best_match_id = None
                 best_match_iou = 0.0
 
@@ -133,7 +135,8 @@ class ParkingRuleEngine:
                     dist = np.hypot(cur_pos[0] - old_rec['anchor_pos'][0],
                                     cur_pos[1] - old_rec['anchor_pos'][1])
 
-                    if (iou >= 0.30 or dist <= self.movement_tolerance) and iou > best_match_iou:
+                    # Chỉ kế thừa nếu vị trí trùng khớp cao (IoU >= 0.4 hoặc lệch < 15px)
+                    if (iou >= 0.40 or dist <= 15.0) and iou > best_match_iou:
                         best_match_iou = iou
                         best_match_id = old_id
 
@@ -148,11 +151,12 @@ class ParkingRuleEngine:
                 else:
                     # Xe mới xuất hiện: mặc định coi là đang chuyển động (is_stopped = False)
                     self.history[track_id] = {
-                        'pos_history': deque([(current_time, cx, cy)], maxlen=60),
+                        'pos_history': deque([(current_time, cx, cy)], maxlen=45),
                         'anchor_pos': cur_pos,
                         'anchor_box': cur_box,
                         'is_stopped': False,
-                        'stopped_start_time': None,
+                        'stationary_start_time': None,
+                        'stopped_confirmed_time': None,
                         'last_seen_time': current_time,
                         'outside_roi_start': None,
                         'is_violation': False,
@@ -174,7 +178,7 @@ class ParkingRuleEngine:
 
             # Tính toán vận tốc tức thời (pixels/giây) và độ dời tịnh tiến
             dt = current_time - pos_hist[0][0]
-            if dt >= 0.30: # Cần ít nhất 0.3s để đo chính xác
+            if dt >= 0.35: # Cần ít nhất 0.35s để đo chính xác vận tốc
                 dx = cx - pos_hist[0][1]
                 dy = cy - pos_hist[0][2]
                 net_dist = np.hypot(dx, dy)
@@ -190,52 +194,59 @@ class ParkingRuleEngine:
             if in_roi:
                 rec['outside_roi_start'] = None
 
-                # Điều kiện xe đứng yên: vận tốc nhỏ và độ dời nhỏ
+                # Điều kiện xe đứng yên: vận tốc nhỏ (< 10 px/s) VÀ độ dịch chuyển nhỏ (< 12 px)
                 is_currently_stationary = (speed <= self.stop_speed_threshold and net_dist <= self.stop_dist_threshold)
 
                 if not rec['is_stopped']:
-                    # Xe trước đó đang chạy, kiểm tra xem có vừa dừng lại không
+                    # XE ĐANG CHẠY:
                     if is_currently_stationary:
-                        # CHÍNH THỨC DỪNG LẠI TRONG VÙNG ROI -> BẮT ĐẦU ĐẾM THỜI GIAN
-                        rec['is_stopped'] = True
-                        rec['stopped_start_time'] = current_time
-                        rec['anchor_pos'] = cur_pos
-                        rec['anchor_box'] = cur_box
-                        rec['dwell_time'] = 0.0
+                        # Xe bắt đầu có dấu hiệu đứng yên -> Bắt đầu đếm thời gian xác nhận (Debounce)
+                        if rec['stationary_start_time'] is None:
+                            rec['stationary_start_time'] = current_time
+                            rec['anchor_pos'] = cur_pos
+                            rec['anchor_box'] = cur_box
+
+                        # Kiểm tra xem xe đã đứng yên liên tục đủ min_stationary_seconds chưa
+                        stationary_duration = current_time - rec['stationary_start_time']
+                        if stationary_duration >= self.min_stationary_seconds:
+                            # ĐÃ ĐỨNG YÊN LIÊN TỤC ĐỦ 1.2 GIÂY -> CHÍNH THỨC XÁC NHẬN DỪNG ĐỖ
+                            rec['is_stopped'] = True
+                            rec['stopped_confirmed_time'] = rec['stationary_start_time']
+                            rec['dwell_time'] = stationary_duration
+                        else:
+                            # Đang trong thời gian ân hạn kiểm chứng -> Vẫn coi là xe chạy bình thường
+                            rec['dwell_time'] = 0.0
                     else:
-                        # Vẫn đang chạy -> KHÔNG TÍNH THỜI GIAN ĐỖ
+                        # Xe vẫn đang di chuyển bình thường -> Hủy bộ đếm xác nhận dừng
+                        rec['stationary_start_time'] = None
+                        rec['stopped_confirmed_time'] = None
                         rec['is_stopped'] = False
-                        rec['stopped_start_time'] = None
                         rec['dwell_time'] = 0.0
                         rec['anchor_pos'] = cur_pos
                         rec['anchor_box'] = cur_box
 
                 else:
-                    # Xe trước đó đã ở trạng thái DỪNG ĐỖ: Kiểm tra xem có bắt đầu di chuyển rời đi không
+                    # XE ĐÃ XÁC NHẬN DỪNG ĐỖ TỪ TRƯỚC:
+                    # Kiểm tra xem xe có lăn bánh di chuyển rời đi không:
+                    # Khoảng cách dịch chuyển so với vị trí neo đỗ ban đầu
                     dist_from_anchor = np.hypot(cx - rec['anchor_pos'][0], cy - rec['anchor_pos'][1])
                     
-                    if dist_from_anchor > self.movement_tolerance and speed > self.stop_speed_threshold:
-                        # XE ĐÃ LĂN BÁNH DI CHUYỂN RỜI ĐI -> RESET TRẠNG THÁI ĐỖ
+                    # Nếu xe di chuyển xa hơn dung sai HOẶC vận tốc tăng lên đáng kể
+                    if dist_from_anchor > self.movement_tolerance or speed > (self.stop_speed_threshold * 1.4):
+                        # XE ĐÃ LĂN BÁNH DI CHUYỂN RỜI ĐI -> LẬP TỨC HỦY TRẠNG THÁI ĐỖ
                         rec['is_stopped'] = False
-                        rec['stopped_start_time'] = None
+                        rec['stationary_start_time'] = None
+                        rec['stopped_confirmed_time'] = None
                         rec['dwell_time'] = 0.0
                         rec['is_violation'] = False
                         rec['anchor_pos'] = cur_pos
                         rec['anchor_box'] = cur_box
                     else:
-                        # VẪN ĐANG ĐỖ TẠI VỊ TRÍ NÀY
-                        # Cập nhật nhẹ nhàng anchor bằng EMA để bù trừ rung camera
-                        rec['anchor_pos'] = (
-                            0.96 * rec['anchor_pos'][0] + 0.04 * cur_pos[0],
-                            0.96 * rec['anchor_pos'][1] + 0.04 * cur_pos[1]
-                        )
-                        rec['anchor_box'] = cur_box
-
-                        # TÍNH THỜI GIAN ĐÃ ĐỖ
-                        dwell_time = current_time - rec['stopped_start_time']
+                        # VẪN ĐANG DỪNG ĐỖ TẠI ĐÂY -> TÍNH THỜI GIAN ĐỖ
+                        dwell_time = current_time - rec['stopped_confirmed_time']
                         rec['dwell_time'] = dwell_time
 
-                        # Kiểm tra vượt ngưỡng vi phạm
+                        # Kiểm tra vượt ngưỡng vi phạm dừng đỗ
                         if dwell_time >= self.time_threshold:
                             if not rec['is_violation']:
                                 rec['is_violation'] = True
@@ -250,9 +261,10 @@ class ParkingRuleEngine:
                             })
 
             else:
-                # Xe đang ở NGOÀI vùng ROI -> Không tính thời gian dừng đỗ
+                # Xe đang ở NGOÀI vùng ROI -> Tuyệt đối không tính thời gian dừng đỗ
                 rec['is_stopped'] = False
-                rec['stopped_start_time'] = None
+                rec['stationary_start_time'] = None
+                rec['stopped_confirmed_time'] = None
                 rec['dwell_time'] = 0.0
                 rec['is_violation'] = False
 

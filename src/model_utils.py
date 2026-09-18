@@ -4,6 +4,19 @@ from ultralytics import YOLO
 DEFAULT_BASELINE_WEIGHTS = 'yolo11m.pt'
 COCO_VEHICLE_CLASSES = [2, 3, 5, 7]  # car, motorcycle, bus, truck
 
+def get_safe_device(device_str='cpu'):
+    """
+    Tự động kiểm tra và chuyển về 'cpu' nếu thiết bị CUDA không khả dụng trên hệ thống.
+    """
+    try:
+        import torch
+        if device_str and 'cuda' in str(device_str).lower():
+            if not torch.cuda.is_available():
+                return 'cpu'
+    except Exception:
+        return 'cpu'
+    return device_str or 'cpu'
+
 def resolve_model_path(weights_path, root_dir=None):
     """
     Tìm đường dẫn tuyệt đối chính xác của file trọng số.
@@ -20,11 +33,12 @@ def resolve_model_path(weights_path, root_dir=None):
     if os.path.exists(candidate):
         return candidate
         
-    # Thử tìm trong output_runs
-    if weights_path in ['output_runs', 'best.pt', 'output_runs/best.pt']:
+    # Thử tìm trong output_runs và models
+    if weights_path in ['output_runs', 'best.pt', 'output_runs/best.pt', 'models/best.pt']:
         candidates = [
             os.path.join(root_dir, 'output_runs', 'best.pt'),
             os.path.join(root_dir, 'output_runs', 'detrac_train', 'weights', 'best.pt'),
+            os.path.join(root_dir, 'models', 'best.pt'),
             os.path.join(root_dir, 'runs', 'detect', 'train-3', 'weights', 'best.pt'),
         ]
         for c in candidates:
@@ -33,7 +47,7 @@ def resolve_model_path(weights_path, root_dir=None):
                 
     return os.path.join(root_dir, weights_path)
 
-def load_yolo_model(weights_path, device='cuda:0', fallback_path=DEFAULT_BASELINE_WEIGHTS, root_dir=None):
+def load_yolo_model(weights_path, device='cpu', fallback_path=DEFAULT_BASELINE_WEIGHTS, root_dir=None):
     """
     Tải mô hình YOLO với cơ chế tự động fallback về baseline nếu file custom bị lỗi/thiếu.
     """
@@ -130,9 +144,12 @@ def discover_available_weights(root_dir=None):
         
     models = []
     
-    # 1. Mô hình custom từ output_runs (ưu tiên số 1)
+    # 1. Mô hình custom từ output_runs hoặc models (ưu tiên số 1)
     custom_candidates = [
-        ('output_runs/best.pt', '🎯 Custom Model: output_runs/best.pt (Mới huấn luyện - Siêu nhanh)'),
+        ('output_runs/yolo11m_custom.pt', '🔥 Custom Model: output_runs/yolo11m_custom.pt (YOLO11m DETRAC - Mới Train)'),
+        ('output_runs/best.pt', '🎯 Custom Model: output_runs/best.pt (YOLO11n DETRAC - Siêu nhanh)'),
+        ('models/yolo11m_custom.pt', '🔥 Custom Model: models/yolo11m_custom.pt (YOLO11m DETRAC)'),
+        ('models/best.pt', '🎯 Custom Model: models/best.pt'),
         ('output_runs/detrac_train/weights/best.pt', '🎯 Custom Model: detrac_train/weights/best.pt'),
         ('runs/detect/train-3/weights/best.pt', '📦 Custom Model: runs/detect/train-3 (YOLO11m DETRAC)'),
     ]

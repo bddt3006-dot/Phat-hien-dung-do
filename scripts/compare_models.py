@@ -16,7 +16,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 
-from model_utils import load_yolo_model, get_target_classes, get_model_info
+from model_utils import load_yolo_model, get_target_classes, get_model_info, get_safe_device
 
 def draw_detections(frame, results, model_name, target_classes, color=(0, 255, 0), latency_ms=0.0):
     """Vẽ bounding boxes và thông số lên frame."""
@@ -59,13 +59,23 @@ def main():
         print(f"[LỖI] Không tìm thấy video test: {video_path}")
         return
 
+    device = get_safe_device('cpu')
+
+    import argparse
+    parser = argparse.ArgumentParser(description="So sánh hiệu năng giữa các mô hình")
+    parser.add_argument('--model-a', type=str, default='output_runs/yolo11m_custom.pt',
+                        help="Đường dẫn mô hình A (mặc định: output_runs/yolo11m_custom.pt)")
+    parser.add_argument('--model-b', type=str, default='output_runs/best.pt',
+                        help="Đường dẫn mô hình B (mặc định: output_runs/best.pt)")
+    args = parser.parse_args()
+
     # 1. Tải 2 mô hình
     print("\n[1/3] Đang tải các mô hình...")
-    custom_weights = 'output_runs/best.pt'
-    baseline_weights = 'yolo11m.pt'
+    custom_weights = args.model_a if os.path.exists(os.path.join(ROOT_DIR, args.model_a)) else 'output_runs/best.pt'
+    baseline_weights = args.model_b if os.path.exists(os.path.join(ROOT_DIR, args.model_b)) else 'yolo11m.pt'
 
-    model_custom, path_c, _ = load_yolo_model(custom_weights, root_dir=ROOT_DIR)
-    model_baseline, path_b, _ = load_yolo_model(baseline_weights, root_dir=ROOT_DIR)
+    model_custom, path_c, _ = load_yolo_model(custom_weights, device=device, root_dir=ROOT_DIR)
+    model_baseline, path_b, _ = load_yolo_model(baseline_weights, device=device, root_dir=ROOT_DIR)
 
     info_c = get_model_info(model_custom, path_c)
     info_b = get_model_info(model_baseline, path_b)
@@ -75,6 +85,7 @@ def main():
 
     print(f"  - Model A (Custom):   {info_c['filename']} ({info_c['size_mb']} MB) | Classes: {cls_c}")
     print(f"  - Model B (Baseline): {info_b['filename']} ({info_b['size_mb']} MB) | Classes: {cls_b}")
+    print(f"  - Thiết bị xử lý:     {device.upper()}")
 
     # 2. Chạy so sánh trên các frame video
     print("\n[2/3] Đang phân tích và đo lường trên 60 frames mẫu...")
@@ -96,12 +107,12 @@ def main():
 
         # Inference Model Custom
         t0 = time.time()
-        res_c = model_custom(frame, conf=0.3, classes=cls_c, imgsz=960, verbose=False)
+        res_c = model_custom(frame, conf=0.3, classes=cls_c, imgsz=960, device=device, verbose=False)
         dt_c = (time.time() - t0) * 1000.0
 
         # Inference Model Baseline
         t0 = time.time()
-        res_b = model_baseline(frame, conf=0.3, classes=cls_b, imgsz=960, verbose=False)
+        res_b = model_baseline(frame, conf=0.3, classes=cls_b, imgsz=960, device=device, verbose=False)
         dt_b = (time.time() - t0) * 1000.0
 
         times_c.append(dt_c)

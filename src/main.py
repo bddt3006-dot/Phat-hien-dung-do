@@ -11,7 +11,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(__file__))
 from ultralytics import YOLO
 from rule_engine import ParkingRuleEngine
-from model_utils import load_yolo_model, get_target_classes, get_model_info, DEFAULT_BASELINE_WEIGHTS
+from model_utils import load_yolo_model, get_target_classes, get_model_info, get_safe_device, DEFAULT_BASELINE_WEIGHTS
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Chương trình Giám Sát Dừng Đỗ Xe Thông Minh")
@@ -45,7 +45,9 @@ def main():
     else:
         selected_weights = config['model'].get('weights', 'output_runs/best.pt')
 
-    device = args.device or config['model'].get('device', 'cuda:0')
+    configured_device = args.device or config['model'].get('device', 'cpu')
+    device = get_safe_device(configured_device)
+
     model, loaded_path, is_fallback = load_yolo_model(
         weights_path=selected_weights,
         device=device,
@@ -61,6 +63,7 @@ def main():
     print(f"  MÔ HÌNH NHẬN DIỆN: {model_info['filename']}")
     print(f"  LOẠI MÔ HÌNH:      {model_info['type']}")
     print(f"  LỚP PHÁT HIỆN:     {target_classes} (Tổng {model_info['num_classes']} lớp)")
+    print(f"  THIẾT BỊ CHẠY:     {device.upper()}")
     if is_fallback:
         print("  [LƯU Ý] Đang chạy ở chế độ FALLBACK (mô hình gốc)")
     print("=" * 60)

@@ -9,15 +9,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 from ultralytics import YOLO
 from src.rule_engine import ParkingRuleEngine
-from src.model_utils import load_yolo_model, get_target_classes, get_model_info
+from src.model_utils import load_yolo_model, get_target_classes, get_model_info, get_safe_device
 
 def run_test():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     with open(os.path.join(root_dir, 'config', 'settings.yaml'), 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+    device = get_safe_device(config['model'].get('device', 'cpu'))
     weights_to_test = config['model'].get('weights', 'output_runs/best.pt')
-    model, loaded_path, is_fallback = load_yolo_model(weights_to_test, root_dir=root_dir)
+    model, loaded_path, is_fallback = load_yolo_model(weights_to_test, device=device, root_dir=root_dir)
     target_classes = get_target_classes(model, config['model'].get('classes', None))
     m_info = get_model_info(model, loaded_path)
 
@@ -31,7 +32,7 @@ def run_test():
     evidence_csv = os.path.join(evidence_dir, 'violation_log.csv')
 
     print(f"Running pipeline test with model: {m_info['filename']} ({m_info['type']})")
-    print(f"Target classes: {target_classes} | Image size: {config['model']['imgsz']}")
+    print(f"Target classes: {target_classes} | Image size: {config['model']['imgsz']} | Device: {device.upper()}")
     frame_count = 0
     total_violations_found = 0
 
@@ -49,7 +50,7 @@ def run_test():
             conf=config['model']['conf_threshold'],
             imgsz=config['model']['imgsz'],
             classes=target_classes,
-            device=config['model'].get('device', 'cuda:0'),
+            device=device,
             persist=True,
             verbose=False
         )

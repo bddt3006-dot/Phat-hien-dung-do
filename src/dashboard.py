@@ -24,7 +24,7 @@ except ImportError:
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from ultralytics import YOLO
 from rule_engine import ParkingRuleEngine
-from model_utils import load_yolo_model, get_target_classes, get_model_info, discover_available_weights, DEFAULT_BASELINE_WEIGHTS
+from model_utils import load_yolo_model, get_target_classes, get_model_info, discover_available_weights, DEFAULT_BASELINE_WEIGHTS, get_safe_device
 
 # ---- Cấu hình Trang Streamlit ----
 st.set_page_config(
@@ -141,13 +141,85 @@ config = load_config()
 # ---- Tải Model (Cache) ----
 @st.cache_resource
 def get_cached_model(weights_path, device):
+    safe_dev = get_safe_device(device)
     m, loaded_p, is_fb = load_yolo_model(
         weights_path=weights_path,
-        device=device,
+        device=safe_dev,
         fallback_path=config['model'].get('baseline_weights', DEFAULT_BASELINE_WEIGHTS),
         root_dir=ROOT_DIR
     )
     return m, loaded_p, is_fb
+
+def extract_canvas_points(objs, canvas_w, canvas_h, img_w, img_h):
+    """
+    Trích xuất tọa độ tuyệt đối chuẩn xác từ các đối tượng vẽ trên Fabric.js Canvas.
+    Hỗ trợ cả Rect, Polygon và Path (double-click polygon).
+    """
+    if not objs or canvas_w <= 0 or canvas_h <= 0:
+        return []
+    scale_x = img_w / float(canvas_w)
+    scale_y = img_h / float(canvas_h)
+    
+    last_obj = objs[-1]
+    obj_type = last_obj.get('type')
+    new_pts = []
+    
+    if obj_type == 'rect':
+        l = last_obj.get('left', 0.0)
+        t = last_obj.get('top', 0.0)
+        w = last_obj.get('width', 0.0) * last_obj.get('scaleX', 1.0)
+        h = last_obj.get('height', 0.0) * last_obj.get('scaleY', 1.0)
+        if w < 0:
+            l += w
+            w = abs(w)
+        if h < 0:
+            t += h
+            h = abs(h)
+        pts = [(l, t), (l + w, t), (l + w, t + h), (l, t + h)]
+        for px, py in pts:
+            rx = int(round(px * scale_x))
+            ry = int(round(py * scale_y))
+            new_pts.append([max(0, min(img_w - 1, rx)), max(0, min(img_h - 1, ry))])
+            
+    elif obj_type == 'polygon' and 'points' in last_obj:
+        pts_list = last_obj['points']
+        if len(pts_list) >= 3:
+            min_x = min(p['x'] for p in pts_list)
+            min_y = min(p['y'] for p in pts_list)
+            obj_left = last_obj.get('left', 0.0)
+            obj_top = last_obj.get('top', 0.0)
+            sx_obj = last_obj.get('scaleX', 1.0)
+            sy_obj = last_obj.get('scaleY', 1.0)
+            for p in pts_list:
+                can_x = obj_left + (p['x'] - min_x) * sx_obj
+                can_y = obj_top + (p['y'] - min_y) * sy_obj
+                rx = int(round(can_x * scale_x))
+                ry = int(round(can_y * scale_y))
+                new_pts.append([max(0, min(img_w - 1, rx)), max(0, min(img_h - 1, ry))])
+                
+    elif obj_type == 'path' and 'path' in last_obj:
+        path_cmds = last_obj['path']
+        raw_coords = [(cmd[1], cmd[2]) for cmd in path_cmds if len(cmd) >= 3 and cmd[0] in ['M', 'L']]
+        if len(raw_coords) >= 3:
+            min_px = min(c[0] for c in raw_coords)
+            min_py = min(c[1] for c in raw_coords)
+            obj_left = last_obj.get('left', 0.0)
+            obj_top = last_obj.get('top', 0.0)
+            sx_obj = last_obj.get('scaleX', 1.0)
+            sy_obj = last_obj.get('scaleY', 1.0)
+            for (cx, cy) in raw_coords:
+                can_x = obj_left + (cx - min_px) * sx_obj
+                can_y = obj_top + (cy - min_py) * sy_obj
+                rx = int(round(can_x * scale_x))
+                ry = int(round(can_y * scale_y))
+                new_pts.append([max(0, min(img_w - 1, rx)), max(0, min(img_h - 1, ry))])
+                
+    # Loại bỏ điểm trùng lặp liên tiếp
+    cleaned = []
+    for p in new_pts:
+        if not cleaned or p != cleaned[-1]:
+            cleaned.append(p)
+    return cleaned
 
 # ---- Khởi Tạo Session State ----
 if 'is_playing' not in st.session_state:
@@ -229,7 +301,7 @@ with st.sidebar:
         st.rerun()
 
     # Nạp thông tin mô hình để xem trước thông số
-    preview_model, preview_path, is_fb = get_cached_model(chosen_w, config['model'].get('device', 'cuda:0'))
+    preview_model, preview_path, is_fb = get_cached_model(chosen_w, get_safe_device(config['model'].get('device', 'cpu')))
     m_info = get_model_info(preview_model, preview_path)
     preview_cls = get_target_classes(preview_model, config['model'].get('classes', None))
     
@@ -346,7 +418,7 @@ with tab_live:
 
     # Khởi tạo mô hình (Hỗ trợ chuyển đổi nhanh và đường lui)
     active_weights = st.session_state.get('selected_weights', config['model'].get('weights', 'output_runs/best.pt'))
-    model, loaded_path, is_fallback = get_cached_model(active_weights, config['model'].get('device', 'cuda:0'))
+    model, loaded_path, is_fallback = get_cached_model(active_weights, get_safe_device(config['model'].get('device', 'cpu')))
     target_classes = get_target_classes(model, config['model'].get('classes', None))
     model_info = get_model_info(model, loaded_path)
 
@@ -402,7 +474,7 @@ with tab_live:
                     conf=config['model']['conf_threshold'],
                     imgsz=config['model']['imgsz'],
                     classes=target_classes,
-                    device=config['model'].get('device', 'cuda:0'),
+                    device=get_safe_device(config['model'].get('device', 'cpu')),
                     persist=True,
                     verbose=False
                 )
@@ -484,7 +556,7 @@ with tab_live:
                     conf=config['model']['conf_threshold'],
                     imgsz=config['model']['imgsz'],
                     classes=target_classes,
-                    device=config['model'].get('device', 'cuda:0'),
+                    device=get_safe_device(config['model'].get('device', 'cpu')),
                     persist=True,
                     verbose=False
                 )
@@ -654,8 +726,8 @@ with tab_roi:
         else:
             img_h, img_w = raw_frame.shape[:2]
 
-            # Bố cục 2 cột: Cột trái (Vẽ trực quan 68%), Cột phải (Bảng điều khiển & Tọa độ 32%)
-            col_draw_area, col_ctrl_area = st.columns([2.1, 1])
+            # Bố cục 2 cột: Cột trái (Vẽ trực quan 72%), Cột phải (Bảng điều khiển & Tọa độ 28%)
+            col_draw_area, col_ctrl_area = st.columns([2.6, 1.0])
 
             with col_draw_area:
                 # Lựa chọn chế độ vẽ
@@ -674,12 +746,12 @@ with tab_roi:
                 # CHẾ ĐỘ 1: CHẤM ĐIỂM TRỰC TIẾP TRÊN ẢNH (CLICK-TO-POINT)
                 # ==============================================================
                 if selected_mode.startswith("🖱️"):
-                    st.markdown("""
+                    st.markdown('''
                     <div class="roi-tip">
                         💡 <b>Hướng dẫn</b>: Click chuột trái trực tiếp lên ảnh bên dưới để thêm các đỉnh của vùng cấm (P1, P2, P3, P4...).
                         Đa giác viền đỏ dạ quang và lớp phủ cảnh báo sẽ tự động nối lại tức thì!
                     </div>
-                    """, unsafe_allow_html=True)
+                    ''', unsafe_allow_html=True)
 
                     # Tạo ảnh hiển thị với các điểm và đa giác hiện có
                     disp_img = raw_frame.copy()
@@ -717,11 +789,12 @@ with tab_roi:
                     disp_rgb = cv2.cvtColor(disp_img, cv2.COLOR_BGR2RGB)
                     disp_pil = Image.fromarray(disp_rgb)
 
-                    # Bắt sự kiện click chuột trực tiếp trên trình duyệt
+                    # Bắt sự kiện click chuột trực tiếp trên trình duyệt (use_column_width='always' giúp hiển thị trọn vẹn toàn bộ video)
                     if streamlit_image_coordinates is not None:
                         click_coords = streamlit_image_coordinates(
                             disp_pil,
                             key=f"roi_click_comp_{st.session_state.roi_selected_frame_idx}_{len(current_pts)}",
+                            use_column_width="always",
                             cursor="crosshair"
                         )
 
@@ -748,73 +821,73 @@ with tab_roi:
                 # CHẾ ĐỘ 2: KÉO VẼ CANVAS (FABRIC.JS)
                 # ==============================================================
                 elif selected_mode.startswith("🎨") and st_canvas is not None:
-                    st.markdown("""
+                    st.markdown('''
                     <div class="roi-tip">
-                        💡 <b>Hướng dẫn</b>: Chọn công cụ Đa Giác (Click nối đỉnh và click đúp để đóng) hoặc Hình Chữ Nhật (kéo thả chuột).
-                        Sau khi vẽ xong, bấm <b>Nạp Tọa Độ Từ Canvas</b> bên dưới.
+                        💡 <b>Hướng dẫn Kéo Vẽ Canvas</b>:
+                        <br>• <b>Kéo Hình Chữ Nhật</b>: Giữ chuột trái và kéo thả để tạo vùng cấm hình hộp.
+                        <br>• <b>Vẽ Đa Giác</b>: Click chuột lần lượt để tạo các đỉnh, <b>nhấp đúp chuột (Double Click)</b> để khép kín hình.
+                        <br>• Sau khi vẽ xong hình, nhấn nút <b>📥 Nạp Tọa Độ Từ Canvas Vào Bộ Nhớ</b> bên dưới.
                     </div>
-                    """, unsafe_allow_html=True)
+                    ''', unsafe_allow_html=True)
 
-                    c_tool = st.radio(
-                        "Công cụ vẽ:",
-                        ["polygon", "rect", "transform"],
-                        format_func=lambda x: {"polygon": "📐 Vẽ Đa Giác", "rect": "⬛ Kéo Hình Chữ Nhật", "transform": "✋ Di chuyển/Sửa"}[x],
-                        horizontal=True
-                    )
+                    col_c_tool, col_c_size = st.columns([1.5, 1.2])
+                    with col_c_tool:
+                        c_tool = st.radio(
+                            "Công cụ vẽ:",
+                            ["rect", "polygon", "transform"],
+                            format_func=lambda x: {"rect": "⬛ Kéo Hình Chữ Nhật (Khuyên dùng)", "polygon": "📐 Vẽ Đa Giác Tự Do", "transform": "✋ Chỉnh sửa / Di chuyển"}[x],
+                            horizontal=True
+                        )
+                    with col_c_size:
+                        canvas_w = st.slider(
+                            "Độ rộng khung vẽ (px):",
+                            min_value=450,
+                            max_value=1100,
+                            value=min(760, max(500, img_w)),
+                            step=20,
+                            help="Điều chỉnh kích thước khung vẽ để hiển thị vừa vặn với độ phân giải màn hình của bạn mà không bị cắt xén"
+                        )
 
-                    canvas_w = min(800, img_w)
                     canvas_h = int(round(canvas_w * img_h / img_w))
+
+                    # Vẽ tham chiếu ROI hiện tại lên ảnh nền
                     raw_rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
-                    bg_img = Image.fromarray(raw_rgb).resize((canvas_w, canvas_h))
+                    if len(st.session_state.roi_points) >= 3:
+                        pts_ref = np.array(st.session_state.roi_points, np.int32)
+                        cv2.polylines(raw_rgb, [pts_ref], True, (0, 220, 255), 2)
+                        p_txt = st.session_state.roi_points[0]
+                        cv2.putText(raw_rgb, "ROI cu (Tham chieu)", (max(10, p_txt[0]), max(20, p_txt[1] - 5)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
+
+                    bg_img = Image.fromarray(raw_rgb).resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
 
                     canvas_res = st_canvas(
                         fill_color="rgba(255, 0, 0, 0.25)",
                         stroke_width=3,
                         stroke_color="#FF0000",
                         background_image=bg_img,
-                        update_streamlit=True,
+                        update_streamlit=False,
                         height=canvas_h,
                         width=canvas_w,
                         drawing_mode=c_tool,
-                        key=f"canvas_draw_{c_tool}"
+                        key=f"canvas_draw_{st.session_state.roi_selected_frame_idx}_{c_tool}"
                     )
 
-                    if st.button("📥 Nạp Tọa Độ Từ Canvas Vào Bộ Nhớ", use_container_width=True):
+                    if st.button("📥 Nạp Tọa Độ Từ Canvas Vào Bộ Nhớ", use_container_width=True, type="primary"):
                         if canvas_res.json_data is not None and "objects" in canvas_res.json_data:
                             objs = canvas_res.json_data["objects"]
                             if len(objs) > 0:
-                                last_obj = objs[-1]
-                                scale_x = img_w / float(canvas_w)
-                                scale_y = img_h / float(canvas_h)
-                                new_pts = []
-
-                                if last_obj.get('type') == 'rect':
-                                    l = last_obj.get('left', 0) * scale_x
-                                    t = last_obj.get('top', 0) * scale_y
-                                    w = last_obj.get('width', 0) * last_obj.get('scaleX', 1) * scale_x
-                                    h = last_obj.get('height', 0) * last_obj.get('scaleY', 1) * scale_y
-                                    new_pts = [
-                                        [int(l), int(t)],
-                                        [int(l + w), int(t)],
-                                        [int(l + w), int(t + h)],
-                                        [int(l), int(t + h)]
-                                    ]
-                                elif last_obj.get('type') == 'path' and 'path' in last_obj:
-                                    for cmd in last_obj['path']:
-                                        if len(cmd) >= 3 and cmd[0] in ['M', 'L']:
-                                            new_pts.append([int(round(cmd[1] * scale_x)), int(round(cmd[2] * scale_y))])
-                                elif last_obj.get('type') == 'polygon' and 'points' in last_obj:
-                                    for p in last_obj['points']:
-                                        new_pts.append([int(round(p['x'] * scale_x)), int(round(p['y'] * scale_y))])
-
+                                new_pts = extract_canvas_points(objs, canvas_w, canvas_h, img_w, img_h)
                                 if len(new_pts) >= 3:
                                     st.session_state.roi_points = new_pts
-                                    st.success(f"Đã trích xuất {len(new_pts)} đỉnh từ Canvas!")
+                                    st.success(f"🎉 Đã trích xuất thành công {len(new_pts)} đỉnh từ Canvas!")
                                     st.rerun()
                                 else:
-                                    st.warning("Vui lòng vẽ ít nhất 1 hình hoàn chỉnh trên Canvas trước khi nạp.")
+                                    st.warning("⚠️ Không trích xuất đủ tối thiểu 3 đỉnh hợp lệ. Nếu dùng Đa Giác, hãy nhấp đúp (Double-Click) để khép kín hình!")
                             else:
-                                st.warning("Canvas chưa có hình vẽ nào.")
+                                st.warning("⚠️ Canvas chưa có hình vẽ nào. Hãy kéo hình chữ nhật hoặc vẽ đa giác trước khi nạp.")
+                        else:
+                            st.warning("⚠️ Chưa nhận được dữ liệu từ Canvas. Hãy vẽ một hình trên khung vẽ.")
 
                 # ==============================================================
                 # CHẾ ĐỘ 3: MẪU CÓ SẴN (PRESETS)
@@ -954,8 +1027,6 @@ with tab_roi:
                     st.image(pv_rgb, caption="Hình ảnh thực tế khi hệ thống giám sát", use_container_width=True)
 
 
-# ==============================================================================
-# TAB 3: BẰNG CHỨNG VI PHẠM & XUẤT BÁO CÁO
 # ==============================================================================
 with tab_evidence:
     st.markdown("### 📸 Nhật Ký & Thư Viện Bằng Chứng Vi Phạm")
